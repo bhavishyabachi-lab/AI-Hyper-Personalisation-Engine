@@ -24,7 +24,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+MODEL = os.getenv("GEMINI_MODEL", "gemini-3.7-flash")
+FALLBACK_MODELS = ["gemini-3.6-flash", "gemini-3.5-flash-lite"]
 CHANNELS = ["WhatsApp","SMS","Email","Push notification","Social media","Website","In-app message"]
 LIFECYCLES = ["Prospect","New customer","Active customer","Loyal customer","At-risk","Inactive","Churned / potentially churned"]
 OBJECTIVES = ["Awareness","Engagement","Consideration","Conversion","Re-engagement","Retention","Feedback","Win-back","Cross-sell","Upsell","Loyalty","Reminder / completion"]
@@ -163,27 +164,60 @@ def clean_json(raw: str):
             return json.loads(m.group(0))
         raise ValueError("The model did not return readable JSON.")
 
+def _gemini_request(prompt: str, key: str, model: str):
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"responseMimeType": "application/json"}
+    }
+    last_error = None
+    for attempt in range(3):
+        try:
+            r = requests.post(
+                url,
+                headers={"x-goog-api-key": key, "Content-Type": "application/json"},
+                json=payload,
+                timeout=75
+            )
+            if r.status_code in (429, 500, 502, 503, 504):
+                last_error = r.text[:800]
+                import time
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            if not r.ok:
+                raise RuntimeError(f"Gemini API error {r.status_code}: {r.text[:900]}")
+            body = r.json()
+            raw = body["candidates"][0]["content"]["parts"][0]["text"]
+            return clean_json(raw)
+        except requests.RequestException as exc:
+            last_error = str(exc)
+            import time
+            time.sleep(1.5 * (attempt + 1))
+    raise RuntimeError(f"Temporary Gemini service unavailability for {model}: {last_error or 'unknown error'}")
+
 def live_generate(data, key, model, variation=False):
     prompt = SYSTEM + "\n\nCASE DATA:\n" + json.dumps(data, ensure_ascii=False, indent=2) + \
              "\n\nRESPONSE FORMAT:\n" + SCHEMA_DESCRIPTION
     if variation:
         prompt += "\n\nCreate a substantially different creative execution while keeping the same strategic logic."
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-    payload = {
-        "contents":[{"parts":[{"text":prompt}]}],
-        "generationConfig":{
-            "responseMimeType":"application/json"
-        }
-    }
-    r = requests.post(url, headers={"x-goog-api-key":key, "Content-Type":"application/json"}, json=payload, timeout=60)
-    if not r.ok:
-        raise RuntimeError(f"Gemini API error {r.status_code}: {r.text[:800]}")
-    body = r.json()
-    try:
-        raw = body["candidates"][0]["content"]["parts"][0]["text"]
-    except Exception:
-        raise RuntimeError(f"Gemini returned an unexpected response: {str(body)[:800]}")
-    return clean_json(raw)
+
+    models = []
+    requested = model.strip() if model else MODEL
+    for m in [requested] + FALLBACK_MODELS:
+        if m not in models:
+            models.append(m)
+
+    errors = []
+    for m in models:
+        try:
+            result = _gemini_request(prompt, key, m)
+            result["_model_used"] = m
+            return result
+        except Exception as exc:
+            errors.append(f"{m}: {exc}")
+            continue
+
+    raise RuntimeError("All Gemini models were temporarily unavailable. " + " | ".join(errors[:3]))
 
 def demo_generate(d):
     c=d.get("company","").lower(); t=d.get("trigger","").lower()
@@ -325,12 +359,15 @@ with tabs[0]:
                 st.session_state["single"]=r
                 st.session_state["single_data"]=data
                 st.session_state["single_mode"]=mode
+                st.session_state["model_used"]=result.get("_model_used", "")
             except Exception as e:
                 st.error(str(e))
 
     r=st.session_state.get("single")
     if r:
         st.divider(); st.subheader("AI output")
+        if st.session_state.get("single_mode")=="Live LLM" and st.session_state.get("model_used"):
+            st.caption("Generated with " + st.session_state["model_used"] + (" (automatic fallback)" if st.session_state["model_used"] != model else ""))
         if st.session_state.get("single_mode")=="Demo / offline": st.warning("Demo/offline output — not an LLM result.")
         c1,c2=st.columns([1.35,1])
         with c1:
