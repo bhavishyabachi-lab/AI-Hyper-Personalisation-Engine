@@ -5,8 +5,7 @@ from typing import Any, Dict, List
 
 import pandas as pd
 import streamlit as st
-from google import genai
-from google.genai import types
+from openai import OpenAI
 
 st.set_page_config(page_title="AI Hyper-Personalisation Engine", page_icon="✨", layout="wide")
 
@@ -33,7 +32,7 @@ st.markdown("""
 # -----------------------------
 # Constants
 # -----------------------------
-MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+MODEL = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
 CHANNELS = ["WhatsApp","SMS","Email","Push notification","Social media","Website","In-app message"]
 LIFECYCLES = ["Prospect","New customer","Active customer","Loyal customer","At-risk","Inactive","Churned / potentially churned"]
 OBJECTIVES = ["Awareness","Engagement","Consideration","Conversion","Re-engagement","Retention","Feedback","Win-back","Cross-sell","Upsell","Loyalty","Reminder / completion"]
@@ -130,40 +129,40 @@ a substantially different creative execution. Do not merely replace a few words.
 Return only valid JSON matching the provided schema. Do not expose hidden chain-of-thought.
 """
 
-SCHEMA = {
-    "type":"object","additionalProperties":False,
-    "properties":{
-        "persona":{"type":"string"},
-        "consumer_insight":{"type":"string"},
-        "creative_angle":{"type":"string"},
-        "signals_used":{"type":"array","items":{"type":"string"}},
-        "signals_excluded":{"type":"array","items":{
-            "type":"object","additionalProperties":False,
-            "properties":{"signal":{"type":"string"},"reason":{"type":"string"}},
-            "required":["signal","reason"]
-        }},
-        "strategy":{"type":"object","additionalProperties":False,
-            "properties":{
-                "message_type":{"type":"string"},"objective":{"type":"string"},
-                "primary_appeal":{"type":"string"},"tone":{"type":"string"},
-                "personalisation_level":{"type":"string"},
-                "key_value_proposition":{"type":"string"},"cta":{"type":"string"}
-            },
-            "required":["message_type","objective","primary_appeal","tone","personalisation_level","key_value_proposition","cta"]
-        },
-        "personalised_message":{"type":"string"},
-        "generic_message":{"type":"string"},
-        "quality_check":{"type":"object","additionalProperties":False,
-            "properties":{
-                "relevance":{"type":"string"},"personalisation":{"type":"string"},
-                "brand_fit":{"type":"string"},"creativity":{"type":"string"},
-                "cta_fit":{"type":"string"},"intrusiveness_risk":{"type":"string"}
-            },
-            "required":["relevance","personalisation","brand_fit","creativity","cta_fit","intrusiveness_risk"]
-        }
-    },
-    "required":["persona","consumer_insight","creative_angle","signals_used","signals_excluded","strategy","personalised_message","generic_message","quality_check"]
-}
+
+class ExcludedSignal(BaseModel):
+    signal: str
+    reason: str
+
+class Strategy(BaseModel):
+    message_type: str
+    objective: str
+    primary_appeal: str
+    tone: str
+    personalisation_level: str
+    key_value_proposition: str
+    cta: str
+
+class QualityCheck(BaseModel):
+    relevance: str
+    personalisation: str
+    brand_fit: str
+    creativity: str
+    cta_fit: str
+    intrusiveness_risk: str
+
+class PersonalisationOutput(BaseModel):
+    persona: str
+    consumer_insight: str
+    creative_angle: str
+    signals_used: list[str]
+    signals_excluded: list[ExcludedSignal]
+    strategy: Strategy
+    personalised_message: str
+    generic_message: str
+    quality_check: QualityCheck
+
+DISPLAY_SCHEMA = PersonalisationOutput.model_json_schema()
 
 DEMO = {
 "Practo — app uninstall / feedback":{
@@ -198,12 +197,12 @@ def get_api_key(user_key: str) -> str:
     if user_key:
         return user_key.strip()
     try:
-        secret_key = st.secrets.get("GEMINI_API_KEY", "")
+        secret_key = st.secrets.get("OPENAI_API_KEY", "")
         if secret_key:
             return str(secret_key).strip()
     except Exception:
         pass
-    return os.getenv("GEMINI_API_KEY","").strip()
+    return os.getenv("OPENAI_API_KEY","").strip()
 
 def to_prompt(d: Dict[str,Any], variation: bool=False) -> str:
     ordered = ["company","industry","product","positioning","segment","age","occupation","location",
@@ -221,9 +220,15 @@ def generate_live(d: Dict[str,Any], api_key: str, model: str, variation: bool=Fa
         config=types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
             response_mime_type="application/json",
-            response_schema=SCHEMA,
+            response_schema=PersonalisationOutput,
         ),
     )
+    if getattr(response, "parsed", None) is not None:
+        parsed = response.parsed
+        if hasattr(parsed, "model_dump"):
+            return parsed.model_dump()
+        if isinstance(parsed, dict):
+            return parsed
     return json.loads(response.text)
 
 def cta_guard(result: Dict[str,Any]) -> Dict[str,Any]:
@@ -261,12 +266,12 @@ st.markdown('<div class="hero"><h1>✨ AI Hyper-Personalisation Engine</h1><p>Dy
 with st.sidebar:
     st.header("Engine controls")
     mode = st.radio("Generation mode", ["Live LLM","Demo / offline"], index=0)
-    user_key = st.text_input("Gemini API key", type="password", help="Optional when the deployment has GEMINI_API_KEY configured as a secret.")
-    model = st.text_input("LLM model", MODEL)
+    user_key = st.text_input("OpenAI API key", type="password", help="Optional when the deployment has OPENAI_API_KEY configured as a secret.")
+    model = st.text_input("Gemini model", MODEL)
     if mode=="Demo / offline":
         st.caption("Demo mode uses predefined logic. It is for testing the interface, not for proving LLM generation.")
     else:
-        st.caption("Live LLM mode is the mode to use for the final prototype demonstration.")
+        st.caption("Live LLM mode uses Gemini for genuine generative content.")
 
 tabs = st.tabs(["Single Consumer","Batch / At Scale","Impact Analysis","Prompt Architecture"])
 
@@ -322,7 +327,7 @@ with tabs[0]:
         if missing:
             st.error("Please fill: "+", ".join(missing))
         elif mode=="Live LLM" and not get_api_key(user_key):
-            st.error("Live LLM mode needs a Gemini API key. Add it in the sidebar or configure GEMINI_API_KEY in the deployment secrets.")
+            st.error("Live LLM mode needs an API key. Add it in the sidebar or configure OPENAI_API_KEY in the deployment secrets.")
         else:
             try:
                 with st.spinner("Understanding consumer → selecting signals → deciding communication strategy → choosing creative angle → generating → checking..."):
