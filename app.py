@@ -24,7 +24,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 CHANNELS = ["WhatsApp","SMS","Email","Push notification","Social media","Website","In-app message"]
 LIFECYCLES = ["Prospect","New customer","Active customer","Loyal customer","At-risk","Inactive","Churned / potentially churned"]
 OBJECTIVES = ["Awareness","Engagement","Consideration","Conversion","Re-engagement","Retention","Feedback","Win-back","Cross-sell","Upsell","Loyalty","Reminder / completion"]
@@ -172,7 +172,6 @@ def live_generate(data, key, model, variation=False):
     payload = {
         "contents":[{"parts":[{"text":prompt}]}],
         "generationConfig":{
-            "temperature":0.85,
             "responseMimeType":"application/json"
         }
     }
