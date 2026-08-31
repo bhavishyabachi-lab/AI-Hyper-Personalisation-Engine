@@ -5,7 +5,8 @@ from typing import Any, Dict, List
 
 import pandas as pd
 import streamlit as st
-from openai import OpenAI
+from google import genai
+from google.genai import types
 
 st.set_page_config(page_title="AI Hyper-Personalisation Engine", page_icon="✨", layout="wide")
 
@@ -32,7 +33,7 @@ st.markdown("""
 # -----------------------------
 # Constants
 # -----------------------------
-MODEL = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
+MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 CHANNELS = ["WhatsApp","SMS","Email","Push notification","Social media","Website","In-app message"]
 LIFECYCLES = ["Prospect","New customer","Active customer","Loyal customer","At-risk","Inactive","Churned / potentially churned"]
 OBJECTIVES = ["Awareness","Engagement","Consideration","Conversion","Re-engagement","Retention","Feedback","Win-back","Cross-sell","Upsell","Loyalty","Reminder / completion"]
@@ -197,12 +198,12 @@ def get_api_key(user_key: str) -> str:
     if user_key:
         return user_key.strip()
     try:
-        secret_key = st.secrets.get("OPENAI_API_KEY", "")
+        secret_key = st.secrets.get("GEMINI_API_KEY", "")
         if secret_key:
             return str(secret_key).strip()
     except Exception:
         pass
-    return os.getenv("OPENAI_API_KEY","").strip()
+    return os.getenv("GEMINI_API_KEY","").strip()
 
 def to_prompt(d: Dict[str,Any], variation: bool=False) -> str:
     ordered = ["company","industry","product","positioning","segment","age","occupation","location",
@@ -213,14 +214,17 @@ def to_prompt(d: Dict[str,Any], variation: bool=False) -> str:
     return "CASE DATA\n"+body+mode
 
 def generate_live(d: Dict[str,Any], api_key: str, model: str, variation: bool=False) -> Dict[str,Any]:
-    client = OpenAI(api_key=api_key)
-    response = client.responses.create(
+    client = genai.Client(api_key=api_key)
+    response = client.models.generate_content(
         model=model,
-        instructions=SYSTEM_PROMPT,
-        input=to_prompt(d, variation=variation),
-        text={"format":{"type":"json_schema","name":"hyper_personalisation_output","strict":True,"schema":SCHEMA}}
+        contents=to_prompt(d, variation=variation),
+        config=types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT,
+            response_mime_type="application/json",
+            response_schema=SCHEMA,
+        ),
     )
-    return json.loads(response.output_text)
+    return json.loads(response.text)
 
 def cta_guard(result: Dict[str,Any]) -> Dict[str,Any]:
     msg = result.get("personalised_message","").strip()
@@ -257,7 +261,7 @@ st.markdown('<div class="hero"><h1>✨ AI Hyper-Personalisation Engine</h1><p>Dy
 with st.sidebar:
     st.header("Engine controls")
     mode = st.radio("Generation mode", ["Live LLM","Demo / offline"], index=0)
-    user_key = st.text_input("OpenAI API key", type="password", help="Optional when the deployment has OPENAI_API_KEY configured as a secret.")
+    user_key = st.text_input("Gemini API key", type="password", help="Optional when the deployment has GEMINI_API_KEY configured as a secret.")
     model = st.text_input("LLM model", MODEL)
     if mode=="Demo / offline":
         st.caption("Demo mode uses predefined logic. It is for testing the interface, not for proving LLM generation.")
@@ -318,7 +322,7 @@ with tabs[0]:
         if missing:
             st.error("Please fill: "+", ".join(missing))
         elif mode=="Live LLM" and not get_api_key(user_key):
-            st.error("Live LLM mode needs an API key. Add it in the sidebar or configure OPENAI_API_KEY in the deployment secrets.")
+            st.error("Live LLM mode needs a Gemini API key. Add it in the sidebar or configure GEMINI_API_KEY in the deployment secrets.")
         else:
             try:
                 with st.spinner("Understanding consumer → selecting signals → deciding communication strategy → choosing creative angle → generating → checking..."):
