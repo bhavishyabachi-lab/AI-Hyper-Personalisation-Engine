@@ -1,38 +1,30 @@
 
 import os
 import json
-from typing import Any, Dict, List
-
+import re
+from typing import Any, Dict
+import requests
 import pandas as pd
 import streamlit as st
-from openai import OpenAI
 
 st.set_page_config(page_title="AI Hyper-Personalisation Engine", page_icon="✨", layout="wide")
 
-# -----------------------------
-# Styling
-# -----------------------------
 st.markdown("""
 <style>
-.block-container{max-width:1240px;padding-top:1.8rem;padding-bottom:4rem}
+.block-container{max-width:1240px;padding-top:1.7rem;padding-bottom:4rem}
 .hero{padding:30px 32px;border-radius:20px;background:linear-gradient(135deg,#20234a,#5b5ce2);color:#fff;margin-bottom:22px}
-.hero h1{margin:0 0 8px;font-size:2.15rem}.hero p{margin:0;opacity:.9;font-size:1rem}
+.hero h1{margin:0 0 8px;font-size:2.15rem}.hero p{margin:0;opacity:.9}
 .helper{font-size:.82rem;color:#68748a;line-height:1.5}
-.output-card{border:1px solid #e4e8f1;border-radius:16px;padding:18px;background:#fff}
-.message{border:1px solid #d8d8f7;border-radius:16px;padding:22px;background:linear-gradient(135deg,#f8f8ff,#fff);line-height:1.65;white-space:pre-wrap;font-size:1.03rem}
+.message{border:1px solid #d8d8f7;border-radius:16px;padding:22px;background:#f8f8ff;line-height:1.65;white-space:pre-wrap;font-size:1.03rem}
 .generic{background:#fafbfe;border-color:#e4e8f1}
 .chip{display:inline-block;padding:6px 10px;border-radius:999px;background:#efefff;color:#4b4dc0;margin:3px 4px 3px 0;font-size:.78rem}
 .chip.gray{background:#f2f3f6;color:#68748a}
 .insight{background:#f3f7ff;border-left:4px solid #5b5ce2;padding:12px 14px;border-radius:8px;line-height:1.55}
-.warningbox{background:#fff7e8;border:1px solid #ead39a;padding:12px 14px;border-radius:10px;line-height:1.5}
-.small{font-size:.75rem;color:#68748a}
+.warn{background:#fff7e8;border:1px solid #ead39a;padding:12px 14px;border-radius:10px}
 </style>
 """, unsafe_allow_html=True)
 
-# -----------------------------
-# Constants
-# -----------------------------
-MODEL = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
+MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 CHANNELS = ["WhatsApp","SMS","Email","Push notification","Social media","Website","In-app message"]
 LIFECYCLES = ["Prospect","New customer","Active customer","Loyal customer","At-risk","Inactive","Churned / potentially churned"]
 OBJECTIVES = ["Awareness","Engagement","Consideration","Conversion","Re-engagement","Retention","Feedback","Win-back","Cross-sell","Upsell","Loyalty","Reminder / completion"]
@@ -41,14 +33,13 @@ TONES = ["AI chooses","Conversational","Friendly","Quirky","Humorous","Premium",
 LENGTHS = ["Very short","Short","Medium","Long"]
 DIMENSIONS = ["Relevance","Perceived personalisation","Persuasiveness","Emotional appeal","Purchase / engagement intention","Brand authenticity","Intrusiveness"]
 
-SYSTEM_PROMPT = r"""
+SYSTEM = """
 You are the intelligence layer of a generic AI Hyper-Personalisation Engine.
 
-MISSION
-Generate communication that feels realistically sendable by the stated brand while
-being meaningfully adapted to the consumer, situation and campaign objective.
+Your task is to turn structured business, consumer, lifecycle, trigger, context and
+campaign information into communication that feels like a real brand could actually send.
 
-CORE PRIORITY ORDER
+PRIORITY:
 1. Situational appropriateness
 2. Consumer relevance
 3. Consumer-behaviour meaning
@@ -56,125 +47,82 @@ CORE PRIORITY ORDER
 5. Objective clarity
 6. Naturalness
 7. Creativity
-8. Channel and length fit
+8. Channel fit
 
-Do not sacrifice relevance, clarity or trust for cleverness.
+CORE LOGIC:
+Signal -> Meaning -> Creative angle -> Message
 
-CONSUMER-BEHAVIOUR LOGIC
-Use behaviour, needs, motivations, preferences, lifecycle, trigger and context when
-they materially improve the communication. Demographics are secondary.
-Never invent facts. Clearly separate supplied facts from reasonable interpretation.
-More attributes do not automatically mean better personalisation.
+Use only relevant signals. Do not simply restate them.
+Do not invent consumer facts.
+Use inferred motivations only as cautious interpretations.
+Do not expose unnecessary behavioural tracking.
+Do not use demographics merely because they are present.
+Creativity must not override clarity, trust or appropriateness.
 
-SIGNAL SELECTION
-For every case, identify the few signals that deserve to influence the communication.
-Do not repeat raw tracking data unnecessarily. A signal can be used without being
-revealed literally to the consumer.
+The communication type must follow lifecycle + trigger + objective.
+Examples:
+- cart/product interest + conversion -> behaviour-triggered conversion
+- inactivity/at-risk + re-engagement -> re-engagement
+- loyal customer + new collection -> loyalty/cross-sell
+- uninstall + feedback -> feedback/recovery
+- payment due -> transactional/reminder
+- festival + conversion -> occasion-based promotion
 
-SIGNAL -> MEANING -> CREATIVE ANGLE
-Translate an observed signal into a consumer-relevant communication implication.
-Then choose one dominant creative angle that connects the consumer meaning, current
-situation, product, brand and objective.
+Choose ONE dominant creative angle:
+reassurance, value, convenience, discovery, urgency, emotional connection,
+occasion/social context, recognition, problem-solution, playful challenge,
+exclusivity, celebration.
 
-Possible creative angles: reassurance, value, convenience, discovery, urgency,
-emotional connection, occasion/social context, recognition, problem-solution,
-playful challenge, exclusivity, celebration.
+Write natural copy, not corporate AI language.
+Avoid phrases like "based on your behaviour", "as a price-sensitive customer",
+or "since you are 24".
+The personalised message must include a CTA.
+The generic control must not use consumer-specific information.
 
-COMMUNICATION STRATEGY
-Determine message type, objective, primary appeal, tone, personalisation level,
-key value proposition and CTA. If message type or tone is AI chooses, infer it.
+Return JSON only with:
+persona, consumer_insight, creative_angle, signals_used, signals_excluded,
+strategy {message_type, objective, primary_appeal, tone, personalisation_level,
+key_value_proposition, cta}, personalised_message, generic_message,
+quality_check {relevance, personalisation, brand_fit, creativity, cta_fit,
+intrusiveness_risk}.
 
-MESSAGE
-Write one final personalised message that:
-- sounds natural and brand-authentic
-- contains meaningful personalisation, not just a name
-- reflects the strongest relevant signal(s)
-- uses the chosen creative angle
-- fits channel and length
-- avoids explaining the personalisation inside the message
-- avoids AI/corporate clichés
-- avoids unnecessary tracking disclosure
-- contains a clear, natural CTA
-
-Do not use phrases like:
-"Based on your behaviour..."
-"As a price-sensitive customer..."
-"Since you are 24..."
-
-CTA
-Always include a CTA in the personalised message.
-Align the CTA with the desired consumer action.
-Examples: conversion -> Shop/Order/Book; feedback -> Share feedback/Start survey;
-re-engagement -> Take another look; win-back -> Come back; reminder -> Pay/Complete.
-
-GENERIC CONTROL
-Create a genuinely generic control for the same product/service and objective.
-Do not use consumer identity, behaviour, motivation, lifecycle, preferences or trigger.
-
-QUALITY CHECK
-Internally test:
-- Would this work for many unrelated consumers? If yes, strengthen personalisation.
-- Does the creative angle actually reflect the consumer meaning?
-- Does it sound like the stated brand/industry?
-- Does tone fit the situation?
-- Is CTA correct?
-- Is any tracking disclosure unnecessary?
-- Are facts invented?
-If weak, rewrite before returning.
-
-VARIATION MODE
-When asked for another version, keep the same strategy and consumer logic but develop
-a substantially different creative execution. Do not merely replace a few words.
-
-Return only valid JSON matching the provided schema. Do not expose hidden chain-of-thought.
+Do not include markdown fences around the JSON.
 """
 
-
-class ExcludedSignal(BaseModel):
-    signal: str
-    reason: str
-
-class Strategy(BaseModel):
-    message_type: str
-    objective: str
-    primary_appeal: str
-    tone: str
-    personalisation_level: str
-    key_value_proposition: str
-    cta: str
-
-class QualityCheck(BaseModel):
-    relevance: str
-    personalisation: str
-    brand_fit: str
-    creativity: str
-    cta_fit: str
-    intrusiveness_risk: str
-
-class PersonalisationOutput(BaseModel):
-    persona: str
-    consumer_insight: str
-    creative_angle: str
-    signals_used: list[str]
-    signals_excluded: list[ExcludedSignal]
-    strategy: Strategy
-    personalised_message: str
-    generic_message: str
-    quality_check: QualityCheck
-
-DISPLAY_SCHEMA = PersonalisationOutput.model_json_schema()
+SCHEMA_DESCRIPTION = """
+{
+  "persona": "string",
+  "consumer_insight": "string",
+  "creative_angle": "string",
+  "signals_used": ["string"],
+  "signals_excluded": [{"signal":"string","reason":"string"}],
+  "strategy": {
+    "message_type":"string","objective":"string","primary_appeal":"string",
+    "tone":"string","personalisation_level":"string",
+    "key_value_proposition":"string","cta":"string"
+  },
+  "personalised_message":"string",
+  "generic_message":"string",
+  "quality_check": {
+    "relevance":"High/Medium/Low",
+    "personalisation":"High/Medium/Low",
+    "brand_fit":"High/Medium/Low",
+    "creativity":"High/Medium/Low",
+    "cta_fit":"High/Medium/Low",
+    "intrusiveness_risk":"High/Medium/Low"
+  }
+}
+"""
 
 DEMO = {
 "Practo — app uninstall / feedback":{
 "company":"Practo","industry":"Healthcare / health-tech","product":"Practo mobile app","positioning":"Convenient digital healthcare access",
 "segment":"Existing app user","age":"","occupation":"","location":"India","behaviour":"Previously used the app and then uninstalled it",
-"preferences":"","motivation":"","price_sensitivity":"Unknown","lifecycle_stage":"Churned / potentially churned","trigger":"App uninstallation",
-"context":"Shortly after uninstall","objective":"Feedback","channel":"WhatsApp","message_type":"AI chooses","tone":"Empathetic","length":"Short"},
+"preferences":"","motivation":"","price_sensitivity":"Unknown","lifecycle_stage":"Churned / potentially churned","trigger":"App uninstallation","context":"Shortly after uninstall","objective":"Feedback","channel":"WhatsApp","message_type":"AI chooses","tone":"Empathetic","length":"Short"},
 "Domino's — Raksha Bandhan / promotion":{
 "company":"Domino's Pizza India","industry":"Food & beverage","product":"Pizza","positioning":"Convenient, playful and value-focused",
-"segment":"Occasion-oriented household","age":"","occupation":"","location":"India","behaviour":"",
-"preferences":"Pizza; shared meals","motivation":"Celebrate Raksha Bandhan together","price_sensitivity":"Medium","lifecycle_stage":"Active customer",
-"trigger":"Raksha Bandhan","context":"Festival occasion","objective":"Conversion","channel":"WhatsApp","message_type":"AI chooses","tone":"Quirky","length":"Short"},
+"segment":"Occasion-oriented household","age":"","occupation":"","location":"India","behaviour":"","preferences":"Pizza; shared meals","motivation":"Celebrate Raksha Bandhan together",
+"price_sensitivity":"Medium","lifecycle_stage":"Active customer","trigger":"Raksha Bandhan","context":"Festival occasion","objective":"Conversion","channel":"WhatsApp","message_type":"AI chooses","tone":"Quirky","length":"Short"},
 "Myntra — repeated sneaker browsing":{
 "company":"Myntra","industry":"Fashion e-commerce","product":"Running shoes","positioning":"Trendy, youthful and accessible",
 "segment":"Budget-conscious fitness consumer","age":"24","occupation":"Young professional","location":"Bengaluru",
@@ -193,119 +141,164 @@ DEMO = {
 "trigger":"Feedback request","context":"Post-interaction","objective":"Feedback","channel":"Email","message_type":"AI chooses","tone":"Friendly","length":"Medium"}
 }
 
-def get_api_key(user_key: str) -> str:
-    if user_key:
+def get_key(user_key):
+    if user_key.strip():
         return user_key.strip()
     try:
-        secret_key = st.secrets.get("OPENAI_API_KEY", "")
-        if secret_key:
-            return str(secret_key).strip()
+        k = st.secrets.get("GEMINI_API_KEY", "")
+        if k: return str(k).strip()
     except Exception:
         pass
-    return os.getenv("OPENAI_API_KEY","").strip()
+    return os.getenv("GEMINI_API_KEY","").strip()
 
-def to_prompt(d: Dict[str,Any], variation: bool=False) -> str:
-    ordered = ["company","industry","product","positioning","segment","age","occupation","location",
-               "behaviour","preferences","motivation","price_sensitivity","lifecycle_stage","trigger",
-               "context","objective","channel","message_type","tone","length"]
-    body = "\n".join(f"{k}: {d.get(k) or 'Not provided'}" for k in ordered)
-    mode = "\nVARIATION MODE: Create a genuinely different creative execution while preserving the same strategic logic." if variation else ""
-    return "CASE DATA\n"+body+mode
+def clean_json(raw: str):
+    raw = raw.strip()
+    raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.I)
+    raw = re.sub(r"\s*```$", "", raw)
+    try:
+        return json.loads(raw)
+    except Exception:
+        m = re.search(r"\{.*\}", raw, re.S)
+        if m:
+            return json.loads(m.group(0))
+        raise ValueError("The model did not return readable JSON.")
 
-def generate_live(d: Dict[str,Any], api_key: str, model: str, variation: bool=False) -> Dict[str,Any]:
-    client = genai.Client(api_key=api_key)
-    response = client.models.generate_content(
-        model=model,
-        contents=to_prompt(d, variation=variation),
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
-            response_mime_type="application/json",
-            response_schema=PersonalisationOutput,
-        ),
-    )
-    if getattr(response, "parsed", None) is not None:
-        parsed = response.parsed
-        if hasattr(parsed, "model_dump"):
-            return parsed.model_dump()
-        if isinstance(parsed, dict):
-            return parsed
-    return json.loads(response.text)
+def live_generate(data, key, model, variation=False):
+    prompt = SYSTEM + "\n\nCASE DATA:\n" + json.dumps(data, ensure_ascii=False, indent=2) + \
+             "\n\nRESPONSE FORMAT:\n" + SCHEMA_DESCRIPTION
+    if variation:
+        prompt += "\n\nCreate a substantially different creative execution while keeping the same strategic logic."
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    payload = {
+        "contents":[{"parts":[{"text":prompt}]}],
+        "generationConfig":{
+            "temperature":0.85,
+            "responseMimeType":"application/json"
+        }
+    }
+    r = requests.post(url, headers={"x-goog-api-key":key, "Content-Type":"application/json"}, json=payload, timeout=60)
+    if not r.ok:
+        raise RuntimeError(f"Gemini API error {r.status_code}: {r.text[:800]}")
+    body = r.json()
+    try:
+        raw = body["candidates"][0]["content"]["parts"][0]["text"]
+    except Exception:
+        raise RuntimeError(f"Gemini returned an unexpected response: {str(body)[:800]}")
+    return clean_json(raw)
 
-def cta_guard(result: Dict[str,Any]) -> Dict[str,Any]:
-    msg = result.get("personalised_message","").strip()
-    cta = result.get("strategy",{}).get("cta","").strip()
-    if cta and cta.lower() not in msg.lower():
-        result["personalised_message"] = msg.rstrip() + f"\n\n👉 {cta}"
-    return result
-
-def demo_generate(d: Dict[str,Any]) -> Dict[str,Any]:
+def demo_generate(d):
     c=d.get("company","").lower(); t=d.get("trigger","").lower()
     if "practo" in c and "uninstall" in t:
-        return {"persona":"Recently Churned Healthcare-App User","consumer_insight":"The known signal is disengagement after an app uninstall. The reason for leaving is unknown and is not assumed.","creative_angle":"Invite the customer to improve the experience without pressure.","signals_used":["Existing relationship","App uninstallation","Churned lifecycle","Feedback objective","WhatsApp"],"signals_excluded":[{"signal":"Age","reason":"Not provided and unnecessary"},{"signal":"Occupation","reason":"Not relevant"},{"signal":"Reason for uninstalling","reason":"Unknown"}],"strategy":{"message_type":"Feedback / recovery","objective":"Feedback","primary_appeal":"Help improve the experience","tone":"Friendly and empathetic","personalisation_level":"Behavioural + lifecycle + trigger","key_value_proposition":"Feedback can help improve the experience","cta":"Share your feedback"},"personalised_message":"Bhavishya Paila, can we ask you one quick question? 👀\n\nWe noticed you're no longer using the Practo App. We'd really like to know what we could have done better.\n\n👉 Share your feedback","generic_message":"We'd love your feedback on your experience with our app. Please share your thoughts with us.","quality_check":{"relevance":"High","personalisation":"High","brand_fit":"High","creativity":"Medium","cta_fit":"High","intrusiveness_risk":"Low"}}
+        return {
+            "persona":"Recently Churned Healthcare-App User",
+            "consumer_insight":"The known signal is disengagement after an app uninstall. The reason for leaving is unknown.",
+            "creative_angle":"Invite the customer to improve the experience without pressure.",
+            "signals_used":["Existing relationship","App uninstallation","Churned lifecycle","Feedback objective","WhatsApp"],
+            "signals_excluded":[{"signal":"Age","reason":"Not provided and unnecessary"},{"signal":"Occupation","reason":"Not relevant"},{"signal":"Reason for uninstalling","reason":"Unknown"}],
+            "strategy":{"message_type":"Feedback / recovery","objective":"Feedback","primary_appeal":"Help improve the experience","tone":"Friendly and empathetic","personalisation_level":"Behavioural + lifecycle + trigger","key_value_proposition":"Feedback can help improve the experience","cta":"Share your feedback"},
+            "personalised_message":"We noticed you're no longer using the Practo App. We'd really like to know what we could have done better.\n\n👉 Share your feedback",
+            "generic_message":"We'd love your feedback on your experience with our app. Please share your thoughts with us.",
+            "quality_check":{"relevance":"High","personalisation":"High","brand_fit":"High","creativity":"Medium","cta_fit":"High","intrusiveness_risk":"Low"}
+        }
     if "domino" in c:
-        return {"persona":"Occasion-Oriented Pizza Sharer","consumer_insight":"The festival creates a shared celebration moment where social context matters more than demographic targeting.","creative_angle":"Turn sibling rivalry into a playful pizza moment.","signals_used":["Raksha Bandhan","Shared-meal context","Conversion objective","Quirky tone","WhatsApp"],"signals_excluded":[{"signal":"Age","reason":"Not needed"},{"signal":"Occupation","reason":"Not relevant"}],"strategy":{"message_type":"Occasion-based promotion","objective":"Conversion","primary_appeal":"Celebration + value","tone":"Quirky and festive","personalisation_level":"Contextual + occasion-based","key_value_proposition":"Make the shared celebration more rewarding","cta":"Order now"},"personalised_message":"Raksha Bandhan plans? 🍕 No sibling fights over the last slice. Give everyone a favourite and make the celebration a little more delicious.\n\n👉 Order now","generic_message":"Enjoy our latest pizza offers today.\n\n👉 Order now","quality_check":{"relevance":"High","personalisation":"High","brand_fit":"High","creativity":"High","cta_fit":"High","intrusiveness_risk":"Low"}}
-    if "cred" in c and "due" in t:
-        return {"persona":"Deadline-Driven Credit Card User","consumer_insight":"An immediate payment deadline makes clarity and fast action more important than entertainment.","creative_angle":"Make the deadline and consequence unmistakably clear.","signals_used":["Payment due trigger","Outstanding balance","Reminder objective","WhatsApp"],"signals_excluded":[{"signal":"Age","reason":"Not relevant"},{"signal":"Occupation","reason":"Not relevant"}],"strategy":{"message_type":"Transactional / reminder","objective":"Reminder / completion","primary_appeal":"Avoid unnecessary interest charges","tone":"Clear and professional","personalisation_level":"Transactional + contextual","key_value_proposition":"Complete payment before the deadline","cta":"Pay now"},"personalised_message":"Your credit-card payment is due tomorrow. Clear the remaining payment today to avoid interest charges on the outstanding amount.\n\n👉 Pay now","generic_message":"Your credit-card payment is due soon. Please complete your payment.","quality_check":{"relevance":"High","personalisation":"High","brand_fit":"High","creativity":"Low","cta_fit":"High","intrusiveness_risk":"Low"}}
+        return {
+            "persona":"Occasion-Oriented Pizza Sharer",
+            "consumer_insight":"The festival creates a shared celebration moment where social context matters more than demographics.",
+            "creative_angle":"Turn sibling rivalry into a playful pizza moment.",
+            "signals_used":["Raksha Bandhan","Shared-meal context","Conversion objective","Quirky tone","WhatsApp"],
+            "signals_excluded":[{"signal":"Age","reason":"Not needed"},{"signal":"Occupation","reason":"Not relevant"}],
+            "strategy":{"message_type":"Occasion-based promotion","objective":"Conversion","primary_appeal":"Celebration + value","tone":"Quirky and festive","personalisation_level":"Contextual + occasion-based","key_value_proposition":"Make the shared celebration more rewarding","cta":"Order now"},
+            "personalised_message":"Raksha Bandhan plans? 🍕 No sibling fights over the last slice. Give everyone a favourite and make the celebration a little more delicious.\n\n👉 Order now",
+            "generic_message":"Enjoy our latest pizza offers today.\n\n👉 Order now",
+            "quality_check":{"relevance":"High","personalisation":"High","brand_fit":"High","creativity":"High","cta_fit":"High","intrusiveness_risk":"Low"}
+        }
+    if "cred" in c:
+        return {
+            "persona":"Deadline-Driven Credit Card User",
+            "consumer_insight":"An immediate payment deadline makes clarity and fast action more important than entertainment.",
+            "creative_angle":"Make the deadline and consequence unmistakably clear.",
+            "signals_used":["Payment due trigger","Outstanding balance","Reminder objective","WhatsApp"],
+            "signals_excluded":[{"signal":"Age","reason":"Not relevant"},{"signal":"Occupation","reason":"Not relevant"}],
+            "strategy":{"message_type":"Transactional / reminder","objective":"Reminder / completion","primary_appeal":"Avoid unnecessary interest charges","tone":"Clear and professional","personalisation_level":"Transactional + contextual","key_value_proposition":"Complete payment before the deadline","cta":"Pay now"},
+            "personalised_message":"Your credit-card payment is due tomorrow. Clear the remaining payment today to avoid interest charges on the outstanding amount.\n\n👉 Pay now",
+            "generic_message":"Your credit-card payment is due soon. Please complete your payment.",
+            "quality_check":{"relevance":"High","personalisation":"High","brand_fit":"High","creativity":"Low","cta_fit":"High","intrusiveness_risk":"Low"}
+        }
     if "agoda" in c:
-        return {"persona":"Travel-Engaged Feedback Seeker","consumer_insight":"The customer already engages with travel communication and the objective is improving future relevance, so feedback is more appropriate than promotion.","creative_angle":"Give the traveler a voice in shaping future communication.","signals_used":["Travel interest","Existing relationship","Feedback objective","Email"],"signals_excluded":[{"signal":"Age","reason":"Not relevant"},{"signal":"Location","reason":"Not needed"}],"strategy":{"message_type":"Feedback / relationship","objective":"Feedback","primary_appeal":"Help tailor future communication","tone":"Friendly and appreciative","personalisation_level":"Relationship + preference","key_value_proposition":"Feedback can improve future travel communication","cta":"Start the survey"},"personalised_message":"Dear Bhavishya,\n\nHelp us make the travel messages you receive more useful to you. Tell us what you'd like to see more of—and what you'd rather skip.\n\n👉 Start the survey","generic_message":"We'd appreciate your feedback on our travel communications. Please take a short survey.","quality_check":{"relevance":"High","personalisation":"High","brand_fit":"High","creativity":"Medium","cta_fit":"High","intrusiveness_risk":"Low"}}
-    # Generic fallback is deliberately labelled as demo logic.
+        return {
+            "persona":"Travel-Engaged Feedback Seeker",
+            "consumer_insight":"The customer already engages with travel communication and the objective is improving future relevance.",
+            "creative_angle":"Give the traveler a voice in shaping future communication.",
+            "signals_used":["Travel interest","Existing relationship","Feedback objective","Email"],
+            "signals_excluded":[{"signal":"Age","reason":"Not relevant"},{"signal":"Location","reason":"Not needed"}],
+            "strategy":{"message_type":"Feedback / relationship","objective":"Feedback","primary_appeal":"Help tailor future communication","tone":"Friendly and appreciative","personalisation_level":"Relationship + preference","key_value_proposition":"Feedback can improve future travel communication","cta":"Start the survey"},
+            "personalised_message":"Dear Bhavishya,\n\nHelp us make the travel messages you receive more useful to you. Tell us what you'd like to see more of—and what you'd rather skip.\n\n👉 Start the survey",
+            "generic_message":"We'd appreciate your feedback on our travel communications. Please take a short survey.",
+            "quality_check":{"relevance":"High","personalisation":"High","brand_fit":"High","creativity":"Medium","cta_fit":"High","intrusiveness_risk":"Low"}
+        }
+    # Demo fallback intentionally not pretending to be LLM.
     obj=d.get("objective","Conversion")
     if obj=="Feedback": cta="Share your feedback"; mt="Feedback"
     elif obj=="Re-engagement": cta="Take another look"; mt="Re-engagement"
     elif obj=="Reminder / completion": cta="Complete it now"; mt="Transactional / reminder"
     elif obj=="Cross-sell": cta="Discover more"; mt="Cross-sell"
-    elif obj=="Retention" or obj=="Loyalty": cta="Keep exploring"; mt="Retention / loyalty"
+    elif obj in ["Retention","Loyalty"]: cta="Keep exploring"; mt="Retention / loyalty"
     else: cta="Shop now"; mt="Promotional"
-    return {"persona":d.get("segment") or "Context-Aware Consumer","consumer_insight":"Demo mode uses simplified logic and is provided only to demonstrate the interface. Live mode is required for arbitrary LLM-generated content.","creative_angle":"Connect the strongest supplied consumer motivation to the campaign objective.","signals_used":["Available relevant consumer/context signals"],"signals_excluded":[{"signal":"Unused optional details","reason":"They do not materially improve this demo message"}],"strategy":{"message_type":mt,"objective":obj,"primary_appeal":"Relevant benefit","tone":d.get("tone") if d.get("tone")!="AI chooses" else "Conversational","personalisation_level":"Contextual demo logic","key_value_proposition":"A relevant benefit for this scenario","cta":cta},"personalised_message":f"Here’s something relevant to your needs around {d.get('product','this offer')}.\n\n👉 {cta}","generic_message":f"Explore {d.get('product','this offer')}.\n\n👉 {cta}","quality_check":{"relevance":"Demo","personalisation":"Demo","brand_fit":"Demo","creativity":"Demo","cta_fit":"High","intrusiveness_risk":"Low"}}
+    return {"persona":d.get("segment") or "Context-Aware Consumer","consumer_insight":"Demo mode uses simplified rules. Use Live LLM for genuine generative output.","creative_angle":"Connect the strongest supplied consumer motivation to the campaign objective.",
+            "signals_used":["Relevant supplied consumer/context signals"],"signals_excluded":[{"signal":"Unused optional details","reason":"They do not materially improve this message"}],
+            "strategy":{"message_type":mt,"objective":obj,"primary_appeal":"Relevant benefit","tone":d.get("tone") if d.get("tone")!="AI chooses" else "Conversational","personalisation_level":"Demo logic","key_value_proposition":"A relevant benefit for this scenario","cta":cta},
+            "personalised_message":f"Here’s something relevant to your needs around {d.get('product','this offer')}.\n\n👉 {cta}",
+            "generic_message":f"Explore {d.get('product','this offer')}.\n\n👉 {cta}",
+            "quality_check":{"relevance":"Demo","personalisation":"Demo","brand_fit":"Demo","creativity":"Demo","cta_fit":"High","intrusiveness_risk":"Low"}}
+
+def ensure_cta(r):
+    c=str(r.get("strategy",{}).get("cta","")).strip()
+    m=str(r.get("personalised_message","")).strip()
+    if c and c.lower() not in m.lower():
+        r["personalised_message"]=m+"\n\n👉 "+c
+    return r
 
 # -----------------------------
 # Header
 # -----------------------------
-st.markdown('<div class="hero"><h1>✨ AI Hyper-Personalisation Engine</h1><p>Dynamic communication conditioned on consumer behaviour, lifecycle, trigger, context and campaign objective.</p></div>', unsafe_allow_html=True)
+st.markdown('<div class="hero"><h1>✨ AI Hyper-Personalisation Engine</h1><p>Dynamic communication conditioned on consumer behaviour, lifecycle, trigger, context and campaign objective.</p></div>',unsafe_allow_html=True)
 
 with st.sidebar:
-    st.header("Engine controls")
-    mode = st.radio("Generation mode", ["Live LLM","Demo / offline"], index=0)
-    user_key = st.text_input("OpenAI API key", type="password", help="Optional when the deployment has OPENAI_API_KEY configured as a secret.")
-    model = st.text_input("Gemini model", MODEL)
-    if mode=="Demo / offline":
-        st.caption("Demo mode uses predefined logic. It is for testing the interface, not for proving LLM generation.")
+    mode=st.radio("Generation mode",["Live LLM","Demo / offline"],index=0)
+    user_key=st.text_input("Gemini API key",type="password",help="Optional if GEMINI_API_KEY is already saved in Streamlit Secrets.")
+    model=st.text_input("Gemini model",MODEL)
+    if mode=="Live LLM":
+        st.caption("Live mode sends the case to Gemini. The API key is read from Streamlit Secrets if you do not enter one here.")
     else:
-        st.caption("Live LLM mode uses Gemini for genuine generative content.")
+        st.caption("Demo mode is only for testing the interface.")
 
-tabs = st.tabs(["Single Consumer","Batch / At Scale","Impact Analysis","Prompt Architecture"])
+tabs=st.tabs(["Single Consumer","Batch / At Scale","Impact Analysis","Prompt Architecture"])
 
-# -----------------------------
-# Single consumer
-# -----------------------------
 with tabs[0]:
     st.subheader("Single Consumer — deep personalisation")
-    st.markdown('<div class="helper">Enter the information you actually know. The engine should not invent missing consumer facts. The segment/persona can be a short description rather than a polished persona.</div>', unsafe_allow_html=True)
-
-    demo_name = st.selectbox("Load benchmark scenario", ["None"] + list(DEMO.keys()))
-    d0 = DEMO.get(demo_name,{})
-    with st.expander("1. Business context", True):
+    st.markdown('<div class="helper">Fill what you actually know. Optional fields can be blank. The engine must not invent consumer facts.</div>',unsafe_allow_html=True)
+    demo_name=st.selectbox("Load benchmark scenario",["None"]+list(DEMO.keys()))
+    d0=DEMO.get(demo_name,{})
+    with st.expander("1. Business context",True):
         c1,c2=st.columns(2)
-        company=c1.text_input("Company *",d0.get("company",""),help="Brand/company. Example: Nike, Myntra, Practo.")
-        industry=c2.text_input("Industry *",d0.get("industry",""),help="Business category. Example: fashion e-commerce, healthcare, food delivery.")
+        company=c1.text_input("Company *",d0.get("company",""),help="Brand/company.")
+        industry=c2.text_input("Industry *",d0.get("industry",""),help="Business category.")
         c1,c2=st.columns(2)
-        product=c1.text_input("Product / Service *",d0.get("product",""),help="The specific product, service, subscription, app or offer.")
+        product=c1.text_input("Product / Service *",d0.get("product",""),help="Specific product, service, app, subscription or offer.")
         positioning=c2.text_input("Brand positioning",d0.get("positioning",""),help="How the brand wants to be perceived. Optional.")
-    with st.expander("2. Consumer context", True):
-        segment=st.text_input("Consumer segment / persona",d0.get("segment",""),help="Optional when the other consumer details are enough for the AI to construct a persona.")
+    with st.expander("2. Consumer context",True):
+        segment=st.text_input("Consumer segment / persona",d0.get("segment",""),help="Optional if the rest of the consumer context is sufficient.")
         c1,c2,c3=st.columns(3)
-        age=c1.text_input("Age",d0.get("age",""),help="Optional.")
-        occupation=c2.text_input("Occupation",d0.get("occupation",""),help="Optional.")
-        location=c3.text_input("Geography",d0.get("location",""),help="Optional; use only when it can add meaningful relevance.")
-        behaviour=st.text_area("Behaviour / previous interactions",d0.get("behaviour",""),help="What the consumer has actually done. Examples: viewed product, abandoned cart, purchased repeatedly, stopped using app.")
-        preferences=st.text_area("Preferences / interests",d0.get("preferences",""),help="What they like or care about. Examples: running, minimalist designs, travel.")
-        motivation=st.text_area("Needs / motivation",d0.get("motivation",""),help="Why they may want the offering. Examples: convenience, fitness, status, saving money.")
+        age=c1.text_input("Age",d0.get("age","")); occupation=c2.text_input("Occupation",d0.get("occupation","")); location=c3.text_input("Geography",d0.get("location",""))
+        behaviour=st.text_area("Behaviour / previous interactions",d0.get("behaviour",""),help="What the consumer actually did.")
+        preferences=st.text_area("Preferences / interests",d0.get("preferences",""))
+        motivation=st.text_area("Needs / motivation",d0.get("motivation",""))
         price=st.selectbox("Price sensitivity",["Unknown","Low","Medium","High"],index=["Unknown","Low","Medium","High"].index(d0.get("price_sensitivity","Unknown")) if d0.get("price_sensitivity","Unknown") in ["Unknown","Low","Medium","High"] else 0)
-    with st.expander("3. Consumer state", True):
+    with st.expander("3. Consumer state",True):
         lifecycle=st.selectbox("Lifecycle stage *",LIFECYCLES,index=LIFECYCLES.index(d0.get("lifecycle_stage","Active customer")) if d0.get("lifecycle_stage","Active customer") in LIFECYCLES else 2)
-        trigger=st.text_input("Trigger / recent event *",d0.get("trigger",""),help="The event that explains why this communication is happening now.")
-        context=st.text_input("Current context / occasion",d0.get("context",""),help="Festival, weekend, after work, deadline, travel season, etc.")
-    with st.expander("4. Campaign & communication", True):
+        trigger=st.text_input("Trigger / recent event *",d0.get("trigger",""),help="The reason communication is happening now.")
+        context=st.text_input("Current context / occasion",d0.get("context",""))
+    with st.expander("4. Campaign & communication",True):
         c1,c2=st.columns(2)
         objective=c1.selectbox("Marketing objective *",OBJECTIVES,index=OBJECTIVES.index(d0.get("objective","Conversion")) if d0.get("objective","Conversion") in OBJECTIVES else 3)
         channel=c2.selectbox("Channel *",CHANNELS,index=CHANNELS.index(d0.get("channel","WhatsApp")) if d0.get("channel","WhatsApp") in CHANNELS else 0)
@@ -316,37 +309,33 @@ with tabs[0]:
 
     data={"company":company,"industry":industry,"product":product,"positioning":positioning,"segment":segment,"age":age,"occupation":occupation,"location":location,"behaviour":behaviour,"preferences":preferences,"motivation":motivation,"price_sensitivity":price,"lifecycle_stage":lifecycle,"trigger":trigger,"context":context,"objective":objective,"channel":channel,"message_type":mtype,"tone":tone,"length":length}
 
-    c1,c2=st.columns([3,1])
-    with c1:
-        generate=st.button("🚀 Generate personalised content",type="primary",use_container_width=True)
-    with c2:
-        variant=st.button("↻ Another creative version",use_container_width=True)
+    c1,c2=st.columns(2)
+    generate=c1.button("🚀 Generate personalised content",type="primary",use_container_width=True)
+    variant=c2.button("↻ Another creative version",use_container_width=True)
 
     if generate or variant:
-        missing=[n for n,v in [("Company",company),("Industry",industry),("Product / Service",product),("Trigger / Recent Event",trigger),("Marketing Objective",objective)] if not v.strip()]
-        if missing:
-            st.error("Please fill: "+", ".join(missing))
-        elif mode=="Live LLM" and not get_api_key(user_key):
-            st.error("Live LLM mode needs an API key. Add it in the sidebar or configure OPENAI_API_KEY in the deployment secrets.")
+        missing=[n for n,v in [("Company",company),("Industry",industry),("Product / Service",product),("Trigger / Recent Event",trigger)] if not v.strip()]
+        key=get_key(user_key)
+        if missing: st.error("Please fill: "+", ".join(missing))
+        elif mode=="Live LLM" and not key: st.error("Gemini API key not found. Add GEMINI_API_KEY to Streamlit Secrets or enter it in the sidebar.")
         else:
             try:
-                with st.spinner("Understanding consumer → selecting signals → deciding communication strategy → choosing creative angle → generating → checking..."):
-                    result = generate_live(data,get_api_key(user_key),model,variation=variant) if mode=="Live LLM" else demo_generate(data)
-                    result=cta_guard(result)
-                st.session_state["single_result"]=result
+                with st.spinner("Interpreting → selecting signals → choosing creative angle → generating → checking..."):
+                    r=live_generate(data,key,model,variant) if mode=="Live LLM" else demo_generate(data)
+                    r=ensure_cta(r)
+                st.session_state["single"]=r
                 st.session_state["single_data"]=data
                 st.session_state["single_mode"]=mode
             except Exception as e:
-                st.error(f"Generation failed: {e}")
+                st.error(str(e))
 
-    r=st.session_state.get("single_result")
+    r=st.session_state.get("single")
     if r:
         st.divider(); st.subheader("AI output")
-        if st.session_state.get("single_mode")=="Demo / offline":
-            st.warning("Demo/offline result. Switch to Live LLM for genuine generative output.")
-        c1,c2=st.columns([1.3,1])
+        if st.session_state.get("single_mode")=="Demo / offline": st.warning("Demo/offline output — not an LLM result.")
+        c1,c2=st.columns([1.35,1])
         with c1:
-            st.markdown("### AI Consumer Persona"); st.markdown(f"**{r['persona']}**")
+            st.markdown("### AI Consumer Persona"); st.markdown("**"+str(r["persona"])+"**")
             st.write(r["consumer_insight"])
             st.markdown("### Creative angle"); st.markdown(f'<div class="insight">{r["creative_angle"]}</div>',unsafe_allow_html=True)
         with c2:
@@ -361,148 +350,102 @@ with tabs[0]:
             for x in r["signals_excluded"]: st.markdown(f'<span class="chip gray">{x["signal"]}</span> — {x["reason"]}',unsafe_allow_html=True)
         st.markdown("### Communication strategy")
         s=r["strategy"]
-        rows=[("Message type",s["message_type"]),("Objective",s["objective"]),("Primary appeal",s["primary_appeal"]),("Tone",s["tone"]),("Personalisation",s["personalisation_level"]),("Key value proposition",s["key_value_proposition"]),("CTA",s["cta"])]
-        st.dataframe(pd.DataFrame(rows,columns=["Decision","Selected approach"]),use_container_width=True,hide_index=True)
+        st.dataframe(pd.DataFrame([
+            ["Message type",s["message_type"]],["Objective",s["objective"]],["Primary appeal",s["primary_appeal"]],
+            ["Tone",s["tone"]],["Personalisation",s["personalisation_level"]],
+            ["Key value proposition",s["key_value_proposition"]],["CTA",s["cta"]]
+        ],columns=["Decision","Selected approach"]),use_container_width=True,hide_index=True)
         c1,c2=st.columns(2)
-        with c1:
-            st.markdown("### ✨ AI-Personalised Message")
-            st.markdown(f'<div class="message">{r["personalised_message"]}</div>',unsafe_allow_html=True)
-        with c2:
-            st.markdown("### Generic Control")
-            st.markdown(f'<div class="message generic">{r["generic_message"]}</div>',unsafe_allow_html=True)
-        st.markdown("### Why this is personalised")
-        st.write("The personalised version is conditioned on the selected consumer and situation signals. The generic control is deliberately consumer-neutral.")
+        with c1: st.markdown("### ✨ AI-Personalised Message"); st.markdown(f'<div class="message">{r["personalised_message"]}</div>',unsafe_allow_html=True)
+        with c2: st.markdown("### Generic Control"); st.markdown(f'<div class="message generic">{r["generic_message"]}</div>',unsafe_allow_html=True)
         if st.button("Add this pair to Impact Analysis",key="add_pair"):
             st.session_state["impact_pair"]={"case":data["company"]+" — "+data["product"],"personalised":r["personalised_message"],"generic":r["generic_message"]}
-            st.success("Message pair added to Impact Analysis.")
+            st.success("Added to Impact Analysis.")
 
-# -----------------------------
-# Batch
-# -----------------------------
 with tabs[1]:
     st.subheader("Batch / At Scale")
-    st.markdown('<div class="helper">Upload a CSV or Excel file containing the same consumer/business fields. One engine is applied independently to every row. For the final project, use Live LLM mode.</div>',unsafe_allow_html=True)
-    template_cols=list(data.keys())
-    template=pd.DataFrame([{k:"" for k in template_cols}])
-    st.download_button("Download empty batch template",template.to_csv(index=False).encode("utf-8"),"hyper_personalisation_batch_template.csv","text/csv")
-    up=st.file_uploader("Upload consumer dataset",type=["csv","xlsx","xls"],key="batch_upload")
+    st.markdown('<div class="helper">Upload CSV or Excel using the same fields. The engine processes each consumer independently.</div>',unsafe_allow_html=True)
+    template_cols=["company","industry","product","positioning","segment","age","occupation","location","behaviour","preferences","motivation","price_sensitivity","lifecycle_stage","trigger","context","objective","channel","message_type","tone","length"]
+    st.download_button("Download batch template",pd.DataFrame([{k:"" for k in template_cols}]).to_csv(index=False).encode(),"hyper_personalisation_batch_template.csv","text/csv")
+    up=st.file_uploader("Upload consumer dataset",type=["csv","xlsx","xls"],key="batch_file")
     if up:
         try:
             df=pd.read_csv(up) if up.name.lower().endswith(".csv") else pd.read_excel(up)
-            st.write(f"**{len(df)} consumer rows loaded.**")
+            st.write(f"**{len(df)} consumers loaded.**")
             st.dataframe(df.head(10),use_container_width=True,hide_index=True)
             if st.button("⚡ Generate for all consumers",type="primary",use_container_width=True):
-                if mode=="Live LLM" and not get_api_key(user_key):
-                    st.error("Live LLM batch generation needs an API key.")
+                key=get_key(user_key)
+                required=["company","industry","product","trigger","objective"]
+                miss=[x for x in required if x not in df.columns]
+                if miss: st.error("Missing columns: "+", ".join(miss))
+                elif mode=="Live LLM" and not key: st.error("Gemini API key not found.")
                 else:
-                    required=["company","industry","product","trigger","objective"]
-                    missing=[c for c in required if c not in df.columns]
-                    if missing:
-                        st.error("Missing required columns: "+", ".join(missing))
-                    else:
-                        outputs=[]; bar=st.progress(0)
-                        keys=["company","industry","product","positioning","segment","age","occupation","location","behaviour","preferences","motivation","price_sensitivity","lifecycle_stage","trigger","context","objective","channel","message_type","tone","length"]
-                        for i,row in df.fillna("").iterrows():
-                            d={k:str(row.get(k,"")) for k in keys}
-                            d["lifecycle_stage"]=d["lifecycle_stage"] or "Active customer"
-                            d["objective"]=d["objective"] or "Conversion"
-                            d["channel"]=d["channel"] or "WhatsApp"
-                            d["message_type"]=d["message_type"] or "AI chooses"
-                            d["tone"]=d["tone"] or "AI chooses"
-                            d["length"]=d["length"] or "Short"
-                            try:
-                                z=generate_live(d,get_api_key(user_key),model) if mode=="Live LLM" else demo_generate(d)
-                                z=cta_guard(z)
-                                outputs.append({
-                                    "Consumer #":i+1,"Company":d["company"],"Product":d["product"],
-                                    "Persona":z["persona"],"Lifecycle":d["lifecycle_stage"],"Trigger":d["trigger"],
-                                    "Message Type":z["strategy"]["message_type"],"Creative Angle":z["creative_angle"],
-                                    "Primary Appeal":z["strategy"]["primary_appeal"],"Tone":z["strategy"]["tone"],"CTA":z["strategy"]["cta"],
-                                    "Personalised Message":z["personalised_message"],"Generic Message":z["generic_message"]
-                                })
-                            except Exception as e:
-                                outputs.append({"Consumer #":i+1,"Company":d["company"],"Product":d["product"],"Persona":"ERROR","Lifecycle":d["lifecycle_stage"],"Trigger":d["trigger"],"Message Type":"ERROR","Creative Angle":"","Primary Appeal":"","Tone":"","CTA":str(e),"Personalised Message":"","Generic Message":""})
-                            bar.progress((i+1)/len(df))
-                        st.session_state["batch_outputs"]=pd.DataFrame(outputs)
-                        st.session_state["batch_mode"]=mode
-                        st.success("Batch processing complete.")
-        except Exception as e:
-            st.error(f"Could not read the dataset: {e}")
-
+                    out=[]; bar=st.progress(0)
+                    for i,row in df.fillna("").iterrows():
+                        d={k:str(row.get(k,"")) for k in template_cols}
+                        d["lifecycle_stage"]=d["lifecycle_stage"] or "Active customer"; d["objective"]=d["objective"] or "Conversion"; d["channel"]=d["channel"] or "WhatsApp"; d["message_type"]=d["message_type"] or "AI chooses"; d["tone"]=d["tone"] or "AI chooses"; d["length"]=d["length"] or "Short"
+                        try:
+                            z=live_generate(d,key,model) if mode=="Live LLM" else demo_generate(d); z=ensure_cta(z)
+                            out.append({"Consumer #":i+1,"Company":d["company"],"Product":d["product"],"Persona":z["persona"],"Lifecycle":d["lifecycle_stage"],"Trigger":d["trigger"],"Message Type":z["strategy"]["message_type"],"Creative Angle":z["creative_angle"],"Primary Appeal":z["strategy"]["primary_appeal"],"Tone":z["strategy"]["tone"],"CTA":z["strategy"]["cta"],"Personalised Message":z["personalised_message"],"Generic Message":z["generic_message"]})
+                        except Exception as e:
+                            out.append({"Consumer #":i+1,"Company":d["company"],"Product":d["product"],"Persona":"ERROR","Lifecycle":d["lifecycle_stage"],"Trigger":d["trigger"],"Message Type":"ERROR","Creative Angle":"","Primary Appeal":"","Tone":"","CTA":str(e),"Personalised Message":"","Generic Message":""})
+                        bar.progress((i+1)/len(df))
+                    st.session_state["batch_outputs"]=pd.DataFrame(out); st.session_state["batch_mode"]=mode
+                    st.success("Batch processing complete.")
+        except Exception as e: st.error(f"Could not read the dataset: {e}")
     bo=st.session_state.get("batch_outputs")
     if bo is not None:
-        if st.session_state.get("batch_mode")=="Demo / offline":
-            st.warning("These are demo outputs. They are not evidence of LLM generation quality.")
-        st.markdown("### Batch results")
         st.dataframe(bo,use_container_width=True,hide_index=True)
         st.download_button("Download generated results",bo.to_csv(index=False).encode(),"hyper_personalisation_results.csv","text/csv")
-        if len(bo)>0:
-            selected=st.selectbox("Inspect one consumer in detail",list(bo["Consumer #"].astype(str)))
-            row=bo[bo["Consumer #"].astype(str)==selected].iloc[0]
+        if len(bo):
+            choice=st.selectbox("Inspect one consumer",bo["Consumer #"].astype(str).tolist())
+            rr=bo[bo["Consumer #"].astype(str)==choice].iloc[0]
             c1,c2=st.columns(2)
-            with c1:
-                st.markdown("### Personalised"); st.markdown(f'<div class="message">{row["Personalised Message"] or "No output"}</div>',unsafe_allow_html=True)
-            with c2:
-                st.markdown("### Generic"); st.markdown(f'<div class="message generic">{row["Generic Message"] or "No output"}</div>',unsafe_allow_html=True)
-            st.write(f"**Creative angle:** {row['Creative Angle']}")
-            st.write(f"**Message type:** {row['Message Type']}  |  **CTA:** {row['CTA']}")
+            with c1: st.markdown("### Personalised"); st.markdown(f'<div class="message">{rr["Personalised Message"] or "No output"}</div>',unsafe_allow_html=True)
+            with c2: st.markdown("### Generic"); st.markdown(f'<div class="message generic">{rr["Generic Message"] or "No output"}</div>',unsafe_allow_html=True)
+            st.write(f"**Creative angle:** {rr['Creative Angle']}")
+            st.write(f"**Message type:** {rr['Message Type']}  | **CTA:** {rr['CTA']}")
 
-# -----------------------------
-# Impact analysis
-# -----------------------------
 with tabs[2]:
     st.subheader("Personalisation Impact Analysis")
-    st.markdown('<div class="helper">This module is for the actual respondent study. Enter real respondent ratings for the same personalised/generic message pair. Do not use the tool-generated numbers below as research findings.</div>',unsafe_allow_html=True)
-
+    st.markdown('<div class="helper">This is the research component. Generate a message pair, add it here, enter respondent ratings, and the app calculates the comparison.</div>',unsafe_allow_html=True)
     pair=st.session_state.get("impact_pair")
     if pair:
-        st.markdown(f"**Current study case:** {pair['case']}")
+        st.markdown(f"**Study case:** {pair['case']}")
         c1,c2=st.columns(2)
         with c1:
             st.markdown("**Personalised message**"); st.markdown(f'<div class="message">{pair["personalised"]}</div>',unsafe_allow_html=True)
         with c2:
             st.markdown("**Generic message**"); st.markdown(f'<div class="message generic">{pair["generic"]}</div>',unsafe_allow_html=True)
-        st.divider()
-        n=st.number_input("Number of respondents",min_value=1,max_value=200,value=10,step=1)
-        st.markdown("**Rating scale:** 1 = very low, 5 = very high. For Intrusiveness, lower is generally preferable.")
-        ids=[f"R{i:03d}" for i in range(1,int(n)+1)]
-        cols=[]
-        for d in DIMENSIONS:
-            cols.extend([f"P — {d}",f"G — {d}"])
-        if st.button("Create / reset rating table",key="create_rating"):
-            st.session_state["rating_df"]=pd.DataFrame([[rid]+[3]*(len(cols)) for rid in ids],columns=["Respondent"]+cols)
-        rating_df=st.session_state.get("rating_df")
-        if rating_df is not None:
-            edited=st.data_editor(rating_df,use_container_width=True,num_rows="fixed",column_config={
-                c: st.column_config.NumberColumn(c,min_value=1,max_value=5,step=1) for c in cols
-            })
-            st.session_state["rating_df"]=edited
-            records=[]
-            for _,rr in edited.iterrows():
-                for d in DIMENSIONS:
-                    records.append({"Respondent":rr["Respondent"],"Dimension":d,"Personalised":rr[f"P — {d}"],"Generic":rr[f"G — {d}"]})
-            scores=pd.DataFrame(records)
-            summary=scores.groupby("Dimension")[["Personalised","Generic"]].mean().round(2)
-            summary["Difference (P-G)"]=(summary["Personalised"]-summary["Generic"]).round(2)
-            st.markdown("### Results")
-            st.dataframe(summary,use_container_width=True)
-            st.markdown("### Personalised vs generic")
-            st.bar_chart(summary[["Personalised","Generic"]])
-            st.markdown("### Interpretation guide")
-            st.write("Positive Difference (P-G) means personalised content scored higher on that dimension. For Intrusiveness, a negative difference is generally preferable.")
-            st.download_button("Download respondent ratings",edited.to_csv(index=False).encode(),"personalisation_impact_ratings.csv","text/csv")
-            st.download_button("Download impact summary",summary.reset_index().to_csv(index=False).encode(),"personalisation_impact_summary.csv","text/csv")
+        n=st.number_input("Number of respondents",min_value=1,max_value=100,value=10,step=1)
+        if st.button("Create / reset respondent rating table"):
+            cols=["Respondent"]
+            for dim in DIMENSIONS:
+                cols += [f"P — {dim}",f"G — {dim}"]
+            st.session_state["ratings"]=pd.DataFrame([[f"R{i:03d}"]+[3]*(len(cols)-1) for i in range(1,int(n)+1)],columns=cols)
+        ratings=st.session_state.get("ratings")
+        if ratings is not None:
+            editable=st.data_editor(ratings,use_container_width=True,num_rows="fixed")
+            st.session_state["ratings"]=editable
+            result_rows=[]
+            for dim in DIMENSIONS:
+                p=pd.to_numeric(editable[f"P — {dim}"],errors="coerce").mean()
+                g=pd.to_numeric(editable[f"G — {dim}"],errors="coerce").mean()
+                result_rows.append([dim,round(p,2),round(g,2),round(p-g,2)])
+            summary=pd.DataFrame(result_rows,columns=["Dimension","Personalised mean","Generic mean","Difference (P-G)"])
+            st.markdown("### Impact results")
+            st.dataframe(summary,use_container_width=True,hide_index=True)
+            st.bar_chart(summary.set_index("Dimension")[["Personalised mean","Generic mean"]])
+            st.markdown("### How to read it")
+            st.write("Positive P-G = personalised content scored higher. For Intrusiveness, a negative P-G is generally preferable.")
+            st.download_button("Download respondent ratings",editable.to_csv(index=False).encode(),"personalisation_impact_ratings.csv","text/csv")
+            st.download_button("Download impact summary",summary.to_csv(index=False).encode(),"personalisation_impact_summary.csv","text/csv")
     else:
-        st.info("Generate a single-consumer message first, then click “Add this pair to Impact Analysis”.")
+        st.info("Generate a message in Single Consumer Mode and click “Add this pair to Impact Analysis”.")
 
-# -----------------------------
-# Prompt architecture
-# -----------------------------
 with tabs[3]:
     st.subheader("Prompt Architecture")
     st.markdown("""
-### Engine flow
-
 **Business + Consumer + Lifecycle + Trigger + Context + Campaign**
 → **Consumer interpretation**
 → **Relevant signal selection**
@@ -513,11 +456,6 @@ with tabs[3]:
 → **CTA**
 → **Quality check**
 → **Generic control**
-
-### Core generation principle
-
-> **Signal → Meaning → Creative Angle → Message**
-
-The LLM is not instructed to merely insert consumer attributes into a template. It must determine what the signals mean for the communication and then create a natural execution.
 """)
-    st.code("Understand → Select signals → Interpret meaning → Strategise → Choose creative angle → Generate → Check",language="text")
+    st.code("Signal → Meaning → Creative angle → Message",language="text")
+    st.caption("The live generation call uses Gemini 2.5 Flash through the Gemini REST API. The API key is stored as GEMINI_API_KEY in Streamlit Secrets.")
